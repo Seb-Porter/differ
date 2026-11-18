@@ -565,10 +565,20 @@ def port_taken(port: int) -> str | None:
 
 
 def exit_with_parent() -> None:
-    """Exit once the parent process is gone, checked once a second, after ending the Claude sessions."""
+    """Exit once the parent process is gone, after ending the Claude sessions."""
     parent = os.getppid()
-    while os.getppid() == parent:
-        time.sleep(1)
+    if sys.platform == "win32":
+        # Windows never reparents an orphan, so its parent pid never changes; wait on the parent process itself.
+        import ctypes
+
+        SYNCHRONIZE, INFINITE = 0x00100000, 0xFFFFFFFF
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        if handle := kernel32.OpenProcess(SYNCHRONIZE, False, parent):
+            kernel32.WaitForSingleObject(ctypes.c_void_p(handle), INFINITE)
+    else:
+        while os.getppid() == parent:
+            time.sleep(1)
     session.stop_all()
     os._exit(0)
 

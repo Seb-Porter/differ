@@ -129,6 +129,10 @@ npx tauri dev      # run from source
 npx tauri build    # differ.app and a .dmg under src-tauri/target/release/bundle/
 ```
 
+On Windows, `npx tauri build` makes `differ.exe` and an NSIS installer instead, and needs the
+MSVC build tools. The app runs `server.py` with Python 3.13 from the python.org installer
+(`winget install Python.Python.3.13`), from uv, or from the PATH.
+
 ## Release
 
 Every push to `main` that passes CI releases a new version. The `Release`
