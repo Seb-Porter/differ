@@ -8,7 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +26,7 @@ import server
 import session
 import terminal
 from github import PullRef
+from helpers import alive, wait_for
 
 FAKE = launcher.fake_claude()
 REF = PullRef("acme", "widgets", 1)
@@ -90,15 +91,6 @@ def starts(log: Path) -> list[dict]:
     return [json.loads(line) for line in log.read_text().splitlines(keepends=True) if line.endswith("\n")]
 
 
-def wait_for(condition: Callable[[], bool], timeout: float = 15) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if condition():
-            return
-        time.sleep(0.05)
-    raise AssertionError("timed out")
-
-
 def output() -> str:
     with session.lock:
         return bytes(session.session_of(REF).output).decode(errors="replace")
@@ -113,28 +105,6 @@ def typing_ready() -> bool:
     return running() and "fake claude" in output()
 
 
-def alive(pid: int) -> bool:
-    if sys.platform == "win32":
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        try:
-            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return (
-        subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:1] != "Z"
-    )
-
-
 def trust_key(folder: Path | str) -> str:
     """The key Claude Code's config file gives a folder: its real path, with forward slashes on Windows too."""
     return Path(os.path.realpath(folder)).as_posix()
@@ -147,21 +117,25 @@ def symlink(link: Path, target: Path) -> None:
         pytest.skip("Creating a symbolic link on Windows needs Developer Mode or an administrator")
 
 
-# The fake claude echoes what the terminal types, escape sequences included, and these tests read them back. A Windows
-# pseudo console renders the process's output instead of passing it on byte for byte, so there they cannot; test_terminal
-# checks what the sessions rely on there.
+# The fake claude echoes what the terminal types, and these tests type escape sequences, such as a title, for it to
+# send back. A Windows pseudo console keeps the escape sequences typed into it to itself instead of passing them on to
+# the process, so there they cannot; test_terminal checks what the sessions rely on there.
 ECHOES = pytest.mark.skipif(
-    sys.platform == "win32", reason="A Windows pseudo console does not echo escape sequences back"
+    sys.platform == "win32", reason="A Windows pseudo console does not pass escape sequences typed into it on"
 )
 
 
 def test_the_binary_is_the_one_differ_claude_names_else_the_first_on_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert session.binary() == FAKE
     monkeypatch.delenv("DIFFER_CLAUDE")
-    monkeypatch.setattr(session.shutil, "which", lambda name: "/opt/bin/claude" if name == "claude" else None)
-    assert session.binary() == Path("/opt/bin/claude")
-    monkeypatch.setattr(session.shutil, "which", lambda name: None)
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    monkeypatch.setattr(session.shutil, "which", lambda asked: f"/opt/bin/{name}" if asked == name else None)
+    assert session.binary() == Path(f"/opt/bin/{name}")
     monkeypatch.setattr(Path, "home", lambda: Path("/nowhere"))
+    # On Windows only claude.exe will do, not the claude.cmd an npm install puts on the PATH.
+    monkeypatch.setattr(session.shutil, "which", lambda asked: "/npm/claude.CMD" if asked == "claude" else None)
+    assert session.binary() == (None if sys.platform == "win32" else Path("/npm/claude.CMD"))
+    monkeypatch.setattr(session.shutil, "which", lambda asked: None)
     assert session.binary() is None
 
 
@@ -219,10 +193,11 @@ def test_an_install_that_fails_says_so_and_starts_nothing(
     assert session.install(REF, fake.port, 80, 24)["installing"]
     assert not running() and session.start(REF, fake.port, 80, 24)["installing"]
     session.write(REF, b"y\r")
-    wait_for(lambda: not session.status(REF)["installing"])
+    # The status stops saying `installing` once the process exits, which can be before the relay has read its end.
+    wait_for(lambda: session.status(REF)["error"])
     status = session.status(REF)
     assert status["error"] == "The install ended with code 3. The terminal shows why." and status["setup"] == "missing"
-    assert "no network" in output() and not status["running"] and starts(fake.log) == []
+    assert not status["installing"] and "no network" in output() and not status["running"] and starts(fake.log) == []
 
 
 def test_a_too_old_claude_updates_itself(fake: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -862,7 +837,7 @@ def test_reap_orphans_ends_a_claude_with_the_session_id_whose_parent_is_gone_and
         assert records.SESSIONS.read(REF, dict)["pid"] == 0 and records.SESSIONS.read(other, dict)["pid"] == 0
     finally:
         try:
-            os.killpg(orphan_pid, 9)
+            os.killpg(orphan_pid, 9)  # pyright: ignore[reportAttributeAccessIssue] - a POSIX-only test
         except OSError:
             pass
         bystander.kill()
@@ -954,6 +929,9 @@ def test_a_merged_or_closed_pull_request_gets_a_session_in_a_detached_worktree_t
     session.close(REF)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="A Windows pseudo console reads its input whether or not the process does"
+)
 def test_a_paste_the_session_does_not_read_holds_up_nothing_else(
     fake: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -970,8 +948,7 @@ def test_a_paste_the_session_does_not_read_holds_up_nothing_else(
     writer = threading.Thread(target=write, daemon=True)
     writer.start()
     time.sleep(0.5)
-    # A Windows pseudo console reads its input whether or not the process does, so there the write never waits.
-    assert writer.is_alive() or sys.platform == "win32"
+    assert writer.is_alive()
     before = time.time()
     assert session.status(REF)["running"]
     session.resize(REF, 100, 30)
@@ -1063,7 +1040,8 @@ def test_trust_adds_the_mirror_to_the_config_and_keeps_the_rest(tmp_path: Path) 
         },
     }
     # Windows keeps no permission bits beyond read-only.
-    assert config.stat().st_mode & 0o777 == 0o600 or sys.platform == "win32"
+    if sys.platform != "win32":
+        assert config.stat().st_mode & 0o777 == 0o600
     assert list(config.parent.iterdir()) == [config]
 
 

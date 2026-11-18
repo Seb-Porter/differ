@@ -207,12 +207,14 @@ def session_of(ref: PullRef) -> Session:
 
 def binary() -> Path | None:
     """The `claude` to run: the one DIFFER_CLAUDE names, else the first on the PATH, in ~/.local/bin or in
-    ~/.claude/local."""
+    ~/.claude/local. On Windows only claude.exe will do: the claude.cmd that an npm install puts on the PATH runs
+    through cmd.exe, which cuts the session's arguments at their first line break and takes a quote in one of them,
+    such as in a branch name, as the end of the quoting, so the rest runs as commands."""
     if named := os.environ.get("DIFFER_CLAUDE"):
         return Path(named)
-    if found := shutil.which("claude"):
-        return Path(found)
     name = "claude.exe" if sys.platform == "win32" else "claude"
+    if found := shutil.which(name):
+        return Path(found)
     for candidate in (Path.home() / ".local" / "bin" / name, Path.home() / ".claude" / "local" / name):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
@@ -641,8 +643,8 @@ def _relay(s: Session, term: terminal.Terminal, claude_code: bool) -> int:
                 records.SESSIONS.write(s.ref, {"id": s.id, "resume": True, "pid": proc.pid})
         _send(s, clients, data)
     code = proc.wait()
-    # The descriptor goes once no write holds it, and the session forgets it first, so no write starts on a closed
-    # descriptor or on one the system gave to something else since.
+    # The terminal closes once no write holds it, and the session forgets it first, so no write starts on a closed
+    # terminal, or on a descriptor the system gave to something else since.
     with s.writes:
         with lock:
             if s.term is term:

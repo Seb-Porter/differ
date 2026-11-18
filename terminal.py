@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -185,15 +186,17 @@ if sys.platform == "win32":
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     _INFINITE = 0xFFFFFFFF
     _WAIT_OBJECT_0 = 0
-    _WAIT_TIMEOUT = 0x102
+    # The longest a wait holds the process's lock, so another thread's wait or poll is not held up behind it.
+    _WAIT_SLICE = 0.1
 
     def _check(ok: object, what: str) -> None:
         if not ok:
             raise ctypes.WinError(ctypes.get_last_error(), f"{what} failed")
 
     class _Console:
-        """The pseudo console and the job of one command, each closed once whoever comes first closes it. Closing the
-        console sends its processes CTRL_CLOSE_EVENT, as closing a console window does."""
+        """The pseudo console and the job of one command, each closed once, by whoever comes first. Closing the
+        console sends its processes CTRL_CLOSE_EVENT, as closing a console window does. Ending the job ends every
+        process the command started, also those with no console of their own, which the console's close misses."""
 
         def __init__(self, console: int, job: int) -> None:
             self.console, self.job = console, job
@@ -207,16 +210,24 @@ if sys.platform == "win32":
 
         def terminate(self) -> None:
             with self.lock:
-                job = self.job
-            if job:
-                _TerminateJobObject(job, 1)
+                if self.job:
+                    _TerminateJobObject(self.job, 1)
+
+        def end_job(self) -> None:
+            with self.lock:
+                job, self.job = self.job, 0
+                if job:
+                    _TerminateJobObject(job, 1)
+                    _CloseHandle(job)
 
     class _WindowsProcess:
-        """The command's process, as `Process` answers it, from the handle CreateProcessW gave."""
+        """The command's process, as `Process` answers it, from the handle CreateProcessW gave, which it closes once
+        it has the exit code."""
 
         def __init__(self, args: Sequence[str], handle: int, pid: int, console: _Console) -> None:
             self.args, self.handle, self._pid, self.console = list(args), handle, pid, console
             self.returncode: int | None = None
+            self.lock = threading.Lock()
 
         @property
         def pid(self) -> int:
@@ -226,17 +237,22 @@ if sys.platform == "win32":
             return self._wait(0)
 
         def wait(self, timeout: float | None = None) -> int:
-            code = self._wait(_INFINITE if timeout is None else int(timeout * 1000))
-            if code is None:
-                raise subprocess.TimeoutExpired(self.args, timeout or 0)
-            return code
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while True:
+                left = _WAIT_SLICE if deadline is None else min(_WAIT_SLICE, max(0.0, deadline - time.monotonic()))
+                if (code := self._wait(int(left * 1000))) is not None:
+                    return code
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(self.args, timeout or 0)
 
         def _wait(self, milliseconds: int) -> int | None:
-            if self.returncode is None and _WaitForSingleObject(self.handle, milliseconds) == _WAIT_OBJECT_0:
-                code = _DWORD()
-                _check(_GetExitCodeProcess(self.handle, ctypes.byref(code)), "GetExitCodeProcess")
-                self.returncode = code.value
-            return self.returncode
+            with self.lock:
+                if self.returncode is None and _WaitForSingleObject(self.handle, milliseconds) == _WAIT_OBJECT_0:
+                    code = _DWORD()
+                    _check(_GetExitCodeProcess(self.handle, ctypes.byref(code)), "GetExitCodeProcess")
+                    self.returncode = code.value
+                    _CloseHandle(self.handle)
+                return self.returncode
 
     class _WindowsTerminal:
         """A ConPTY pseudo console. A pseudo console keeps its output pipe open after its process exits, so a thread
@@ -266,7 +282,7 @@ if sys.platform == "win32":
             return count.value
 
         def wait_writable(self, timeout: float) -> None:
-            pass
+            """Never needed: a write here blocks instead of answering 0."""
 
         def resize(self, cols: int, rows: int) -> None:
             with self.console.lock:
@@ -274,7 +290,10 @@ if sys.platform == "win32":
                     _ResizePseudoConsole(self.console.console, _Coord(cols, rows))
 
         def close(self) -> None:
+            """Also ends the processes the command started that are still there, as the end of a POSIX session's
+            terminal does."""
             self.console.close_console()
+            self.console.end_job()
             for handle in (self.output, self.input):
                 _CloseHandle(handle)
 
@@ -303,8 +322,10 @@ if sys.platform == "win32":
         _InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
         attributes = ctypes.create_string_buffer(size.value)
         job = 0
+        initialized = False
         try:
             _check(_InitializeProcThreadAttributeList(attributes, 1, 0, ctypes.byref(size)), "InitializeAttributes")
+            initialized = True
             # The attribute's value is the console handle itself, not a pointer to it.
             _check(
                 _UpdateProcThreadAttribute(
@@ -342,12 +363,15 @@ if sys.platform == "win32":
                 f"Starting {args[0]}",
             )
         except OSError:
-            _ClosePseudoConsole(console)
-            _CloseHandle(to_console_write)
+            # The output pipe goes first: closing the console writes a last frame to it, and waits until it is read
+            # or the pipe is gone.
             _CloseHandle(from_console_read)
+            _CloseHandle(to_console_write)
+            _ClosePseudoConsole(console)
             raise
         finally:
-            _DeleteProcThreadAttributeList(attributes)
+            if initialized:
+                _DeleteProcThreadAttributeList(attributes)
         try:
             job = _CreateJobObjectW(None, None)
             _check(job, "CreateJobObjectW")

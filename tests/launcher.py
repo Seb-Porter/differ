@@ -7,9 +7,11 @@ interpreter and a zip archive that holds the script as __main__.py."""
 
 from __future__ import annotations
 
+import atexit
 import ensurepip
 import functools
 import io
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -22,7 +24,9 @@ FAKE_GH = TESTS / "e2e" / "fakegh"
 
 @functools.cache
 def _folder() -> Path:
-    return Path(tempfile.mkdtemp(prefix="differ-tests-bin-"))
+    folder = Path(tempfile.mkdtemp(prefix="differ-tests-bin-"))
+    atexit.register(shutil.rmtree, folder, ignore_errors=True)
+    return folder
 
 
 def _windows_executable(script: Path, name: str) -> Path:
@@ -37,7 +41,8 @@ def _windows_executable(script: Path, name: str) -> Path:
     path = folder / f"{name}.exe"
     # The base interpreter, not the virtual environment's python.exe, which starts the base one as a process of its own;
     # the fakes need nothing from the environment.
-    path.write_bytes(stub + f'#!"{sys._base_executable}"\r\n'.encode() + archive.getvalue())
+    base = sys._base_executable  # pyright: ignore[reportAttributeAccessIssue]
+    path.write_bytes(stub + f'#!"{base}"\r\n'.encode() + archive.getvalue())
     return path
 
 
