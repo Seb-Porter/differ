@@ -9,6 +9,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -120,16 +121,22 @@ def _drop_copied_branch(mirror: Path, branch: str) -> None:
 
 
 def remove_tree(folder: Path, ignore_errors: bool = False) -> None:
-    """Delete the folder with whatever it holds. Git makes its object files read-only, which Windows refuses to
-    delete, so a file that does not go is made writable and deleted again."""
+    """Delete the folder with whatever it holds. Git makes its object files read-only, which Windows, unlike POSIX,
+    refuses to delete, so there a file or folder that does not go is made writable and deleted again."""
+    if sys.platform != "win32":
+        shutil.rmtree(folder, ignore_errors=ignore_errors)
+        return
 
-    def writable_again(delete: Callable[[str], object], path: str, _: BaseException) -> None:
-        try:
-            os.chmod(path, stat.S_IWRITE)
-            delete(path)
-        except OSError:
-            if not ignore_errors:
-                raise
+    def writable_again(delete: Callable[[str], object], path: str, error: BaseException) -> None:
+        if delete in (os.unlink, os.rmdir):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                delete(path)
+                return
+            except OSError:
+                pass
+        if not ignore_errors:
+            raise error
 
     shutil.rmtree(folder, onexc=writable_again)
 
