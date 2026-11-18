@@ -239,6 +239,16 @@ def test_an_open_runs_the_tool_of_the_first_app_folder_that_holds_the_editor(
     assert fake.started[0][0] == str(editors.APP_FOLDERS[0] / TOOLS["pycharm"])
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Install folders that name the version are Windows's")
+def test_of_two_versions_in_one_app_folder_the_newest_opens(fake: FakeProcesses, clone: StubCheckouts) -> None:
+    newest = editors.APP_FOLDERS[0] / "PyCharm 2026.10/bin/pycharm64.exe"
+    for tool in (newest, editors.APP_FOLDERS[0] / "PyCharm 2026.9/bin/pycharm64.exe"):
+        tool.parent.mkdir(parents=True)
+        tool.touch()
+    editors.open_file(REF, "pycharm", "a.py", 1)
+    assert fake.started[0][0] == str(newest)
+
+
 def test_prepare_warms_the_clone(fake: FakeProcesses, clone: StubCheckouts, at_once: None) -> None:
     editors.prepare(REF)
     assert clone.warmed == [REF]

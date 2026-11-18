@@ -38,10 +38,37 @@ if sys.platform == "win32":
     JETBRAINS_CONFIG = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "JetBrains"
     # The program that opens a URL in the app the system chose for its scheme.
     URL_OPENER = "explorer.exe"
+    # Each local editor's install folders, and the program inside them the editor runs as, which takes the command
+    # line tool's arguments.
+    BUNDLES: dict[str, tuple[tuple[str, ...], str]] = {
+        "vscode": (("Microsoft VS Code",), "Code.exe"),
+        "cursor": (("cursor",), "Cursor.exe"),
+        "pycharm": (("PyCharm*", "JetBrains/PyCharm*"), "bin/pycharm64.exe"),
+        "idea": (("IntelliJ IDEA*", "JetBrains/IntelliJ IDEA*"), "bin/idea64.exe"),
+        "webstorm": (("WebStorm*", "JetBrains/WebStorm*"), "bin/webstorm64.exe"),
+        "goland": (("GoLand*", "JetBrains/GoLand*"), "bin/goland64.exe"),
+    }
 else:
     APP_FOLDERS = (Path("/Applications"), Path.home() / "Applications")
     JETBRAINS_CONFIG = Path.home() / "Library/Application Support/JetBrains"
     URL_OPENER = "open"
+    # Each local editor's app bundles, and the command line tool inside them.
+    BUNDLES = {
+        "vscode": (("Visual Studio Code.app",), "Contents/Resources/app/bin/code"),
+        "cursor": (("Cursor.app",), "Contents/Resources/app/bin/cursor"),
+        "pycharm": (
+            (
+                "PyCharm.app",
+                "PyCharm CE.app",
+                "PyCharm Professional Edition.app",
+                "PyCharm Community Edition.app",
+            ),
+            "Contents/MacOS/pycharm",
+        ),
+        "idea": (("IntelliJ IDEA.app", "IntelliJ IDEA CE.app", "IntelliJ IDEA Ultimate.app"), "Contents/MacOS/idea"),
+        "webstorm": (("WebStorm.app",), "Contents/MacOS/webstorm"),
+        "goland": (("GoLand.app",), "Contents/MacOS/goland"),
+    }
 
 
 @dataclass(frozen=True)
@@ -126,11 +153,11 @@ class _Local(_Launcher):
 
     def find(self) -> Path | None:
         """The command line tool of the first of the editor's app bundles installed, or None. An app may be a pattern,
-        as a Windows install folder that names the version is, and of the folders it matches the last by name goes
+        as a Windows install folder that names the version is, and of the folders it matches the newest version goes
         first."""
         for folder in APP_FOLDERS:
             for app in self.apps:
-                for bundle in sorted(folder.glob(app), reverse=True):
+                for bundle in sorted(folder.glob(app), key=_version, reverse=True):
                     if (path := bundle / self.tool).exists():
                         return path
         return None
@@ -171,13 +198,18 @@ class _Code(_Local):
 _launches: dict[tuple[str, Path], tuple[Path, Launch]] = {}
 
 
+def _version(bundle: Path) -> tuple[int, ...]:
+    """The numbers in the folder's name, so that 2026.10 comes after 2026.9 and the edition in a name counts for
+    nothing."""
+    return tuple(int(n) for n in re.findall(r"\d+", bundle.name))
+
+
 @dataclass(frozen=True)
 class _JetBrains(_Local):
     """The adapter for a JetBrains IDE. Its configuration folders start with one of `configs`, followed by the
     version."""
 
     configs: tuple[str, ...]
-    scheme: str
 
     def busy(self, folder: Path) -> bool:
         """Whether the launch this IDE started last for the folder is still handing its request to an IDE that was
@@ -198,7 +230,7 @@ class _JetBrains(_Local):
         also takes about two seconds to hand its request to a running IDE, so a file of a project the IDE has open
         goes through the IDE's URL scheme instead, which opens it at once."""
         if self.has_open(folder) and processes.oldest(command):
-            return [URL_OPENER, f"{self.scheme}://open?file={quote(file.as_posix())}&line={line}"]
+            return [URL_OPENER, f"{self.editor.id}://open?file={quote(file.as_posix())}&line={line}"]
         return [str(command), str(folder), "--line", str(line), str(file)]
 
     def has_open(self, folder: Path) -> bool:
@@ -231,75 +263,15 @@ class _GitHub(_Launcher):
         processes.start([URL_OPENER, url])
 
 
-# Each local editor's app bundles and the tool inside them: on Windows the install folders and the program the editor
-# runs as, which takes the command line tool's arguments.
-_WINDOWS = sys.platform == "win32"
 _LAUNCHERS: dict[str, _Launcher] = {
     a.editor.id: a
     for a in (
-        _Code(
-            Editor("vscode", "VS Code"),
-            *(
-                (("Microsoft VS Code",), "Code.exe")
-                if _WINDOWS
-                else (("Visual Studio Code.app",), "Contents/Resources/app/bin/code")
-            ),
-        ),
-        _Code(
-            Editor("cursor", "Cursor"),
-            *((("cursor",), "Cursor.exe") if _WINDOWS else (("Cursor.app",), "Contents/Resources/app/bin/cursor")),
-        ),
-        _JetBrains(
-            Editor("pycharm", "PyCharm"),
-            *(
-                (("PyCharm*", "JetBrains/PyCharm*"), "bin/pycharm64.exe")
-                if _WINDOWS
-                else (
-                    (
-                        "PyCharm.app",
-                        "PyCharm CE.app",
-                        "PyCharm Professional Edition.app",
-                        "PyCharm Community Edition.app",
-                    ),
-                    "Contents/MacOS/pycharm",
-                )
-            ),
-            ("PyCharm",),
-            "pycharm",
-        ),
-        _JetBrains(
-            Editor("idea", "IntelliJ IDEA"),
-            *(
-                (("IntelliJ IDEA*", "JetBrains/IntelliJ IDEA*"), "bin/idea64.exe")
-                if _WINDOWS
-                else (
-                    ("IntelliJ IDEA.app", "IntelliJ IDEA CE.app", "IntelliJ IDEA Ultimate.app"),
-                    "Contents/MacOS/idea",
-                )
-            ),
-            ("IntelliJIdea", "IdeaIC"),
-            "idea",
-        ),
-        _JetBrains(
-            Editor("webstorm", "WebStorm"),
-            *(
-                (("WebStorm*", "JetBrains/WebStorm*"), "bin/webstorm64.exe")
-                if _WINDOWS
-                else (("WebStorm.app",), "Contents/MacOS/webstorm")
-            ),
-            ("WebStorm",),
-            "webstorm",
-        ),
-        _JetBrains(
-            Editor("goland", "GoLand"),
-            *(
-                (("GoLand*", "JetBrains/GoLand*"), "bin/goland64.exe")
-                if _WINDOWS
-                else (("GoLand.app",), "Contents/MacOS/goland")
-            ),
-            ("GoLand",),
-            "goland",
-        ),
+        _Code(Editor("vscode", "VS Code"), *BUNDLES["vscode"]),
+        _Code(Editor("cursor", "Cursor"), *BUNDLES["cursor"]),
+        _JetBrains(Editor("pycharm", "PyCharm"), *BUNDLES["pycharm"], ("PyCharm",)),
+        _JetBrains(Editor("idea", "IntelliJ IDEA"), *BUNDLES["idea"], ("IntelliJIdea", "IdeaIC")),
+        _JetBrains(Editor("webstorm", "WebStorm"), *BUNDLES["webstorm"], ("WebStorm",)),
+        _JetBrains(Editor("goland", "GoLand"), *BUNDLES["goland"], ("GoLand",)),
         _GitHub(Editor("github", "GitHub", local=False)),
     )
 }
