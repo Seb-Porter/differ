@@ -40,6 +40,8 @@ def write_json(path: Path, data: object) -> None:
 
 
 def _replace(tmp: Path, path: Path) -> None:
+    """Move the file into place. Windows refuses the move while a reader has the old file open, so there it tries
+    again a few times."""
     for _ in range(REPLACE_TRIES - 1):
         try:
             os.replace(tmp, path)
