@@ -27,9 +27,10 @@ Usage: server.py [port] [--log <path>] [--exit-with-parent]   (default port 8765
   /open?pr=<url or owner/repo#n>     redirects to the page above
                                      (the page, /open and /status refuse a request a browser marks
                                      Sec-Fetch-Site: cross-site, so no web page can start a clone or a build)
-  /image?src=<link>                  the image a link to a file of a GitHub repository names, read with gh, since
-                                     GitHub sends a file of a private repository only to a signed-in browser
-                                     (refused cross-site, as the page is)
+  /image?src=<link>                  the image a link to a file of a GitHub repository, or to a file pasted into a
+                                     description or a comment, names, read with gh's sign-in, since GitHub sends
+                                     such a file of a private repository only to a signed-in browser (refused
+                                     cross-site, as the page is)
   /api/link?pr=<url or owner/repo#n> the pull request's name, its repository, the path of its page, whether the
                                      repository is followed and, for a followed one, whether the pull request comes
                                      from a fork (null when unasked or when GitHub can't answer); a 400 for text
@@ -281,9 +282,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if url.path == "/image":
                 src = (query.get("src") or [""])[0]
-                if not (ctype := file_types.support_of(urlparse(src).path).image_type):
-                    return self.send(404, error_page(f"{src} is not an image"))
                 try:
+                    if github.USER_ATTACHMENT.fullmatch(src):
+                        return self.send_image(*github.user_attachment(src))
+                    if not (ctype := file_types.support_of(urlparse(src).path).image_type):
+                        return self.send(404, error_page(f"{src} is not an image"))
                     return self.send_image(github.repo_file(src), ctype)
                 except ValueError as exc:
                     return self.send(404, error_page(str(exc)))

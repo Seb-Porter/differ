@@ -271,7 +271,7 @@ def graphql(args: list[str]) -> None:
     pr = {
         "id": f"PR_{number}",
         "headRefOid": state["head"],
-        "bodyHTML": "",
+        "bodyHTML": meta.get("bodyHTML", ""),
         "state": meta["state"],
         "isDraft": meta["isDraft"],
         "reviews": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": state["reviews"]},

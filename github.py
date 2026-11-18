@@ -3,9 +3,11 @@ Every gh command the app runs goes through here."""
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
@@ -25,6 +27,11 @@ REFERENCE = re.compile(rf"(?:https?://github\.com/)?(?<![\w.-]){SLUG}(?:/pull/|/
 REPO_FILES = (
     re.compile(rf"^https://github\.com/{SLUG}/(?:blob|raw)/(?P<rest>[^?#]+)"),
     re.compile(rf"^https://raw\.githubusercontent\.com/{SLUG}/(?P<rest>[^?#]+)"),
+)
+# A file pasted into a description or a comment. GitHub sends one of a private repository only to a signed-in request,
+# so gh's token goes with the request, and only to this host.
+USER_ATTACHMENT = re.compile(
+    r"https://github\.com(?P<path>/user-attachments/assets/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"
 )
 # A ref of up to this many parts, such as feature/x/y, splits from the path in a link to a repository file.
 REF_PARTS = 4
@@ -292,3 +299,29 @@ def repo_file(url: str) -> bytes:
             return r.stdout
         stderr = r.stderr.decode(errors="replace").strip()
     raise commands.CommandError(f"GitHub has no file at {url}: {commands.tail(stderr)}")
+
+
+def user_attachment(url: str) -> tuple[bytes, str]:
+    """The content and the media type of the image a link to a pasted file names (see USER_ATTACHMENT). GitHub answers
+    a signed-in request with a redirect to a short-lived address on another host, which gets the request without the
+    token. Raises ValueError for any other link or for a file that is not an image, and CommandError when GitHub has
+    no such file or does not answer."""
+    if not (m := USER_ATTACHMENT.fullmatch(url)):
+        raise ValueError(f"{url} is not a link to a file pasted on GitHub")
+    token = commands.run(["gh", "auth", "token", "--hostname", "github.com"]).decode().strip()
+    try:
+        connection = http.client.HTTPSConnection("github.com", timeout=commands.TIMEOUT)
+        try:
+            connection.request("GET", m["path"], headers={"Authorization": f"Bearer {token}", "User-Agent": "differ"})
+            answer = connection.getresponse()
+            location = answer.getheader("Location") or ""
+        finally:
+            connection.close()
+        if answer.status not in (301, 302, 303, 307, 308) or not location.startswith("https://"):
+            raise commands.CommandError(f"GitHub has no file at {url}: HTTP {answer.status}")
+        with urllib.request.urlopen(location, timeout=commands.TIMEOUT) as r:
+            if not (ctype := r.headers.get_content_type()).startswith("image/"):
+                raise ValueError(f"{url} is not an image but {ctype}")
+            return r.read(), ctype
+    except (OSError, http.client.HTTPException) as exc:
+        raise commands.CommandError(f"GitHub did not send {url}: {exc}") from None

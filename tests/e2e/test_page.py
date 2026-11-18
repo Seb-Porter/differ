@@ -155,6 +155,53 @@ def test_an_image_of_a_private_repository_in_the_description_loads_through_the_s
     expect(page.locator(".prbody a[href='https://example.com/pixel.png']")).to_have_text("A tracker")
 
 
+def test_the_dark_image_of_a_picture_in_the_description_loads_through_the_server(
+    page: Page, server_url: str, add_pr: AddPr, gh_state: Path
+) -> None:
+    pixel = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+        b"\x00\x00\x00\rIDATx\x9cc\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    path = add_pr({}, {"docs/dark.png": pixel})
+    meta_file = gh_state / f"pr{path.rsplit('/', 1)[1]}.json"
+    meta = json.loads(meta_file.read_text())
+    src = f"https://github.com/acme/widgets/blob/{meta['headRefOid']}/docs/{{}}.png?raw=true"
+    pasted = "https://github.com/user-attachments/assets/8aa87a1e-60d9-43fa-bcf7-4de5637fb27c"
+    body_html = (
+        f'<picture><source media="(prefers-color-scheme: dark)" srcset="{src.format("dark")} 1x">'
+        f'<img alt="The new page" src="{src.format("light")}"></picture>'
+        f'<p><img alt="Pasted" src="{pasted}"></p>'
+    )
+    meta_file.write_text(json.dumps({**meta, "body": "<picture>", "bodyHTML": body_html}))
+    page.emulate_media(color_scheme="dark")
+    open_pr(page, server_url, path)
+    expect(page.locator(".prbody source")).to_have_attribute(
+        "srcset", f"/image?src={quote(src.format('dark'), safe='')} 1x"
+    )
+    expect(page.locator(".prbody img[alt='Pasted']")).to_have_attribute("src", f"/image?src={quote(pasted, safe='')}")
+    page.wait_for_function("document.querySelector('.prbody img').complete")
+    assert page.locator(".prbody img").first.evaluate("img => img.naturalWidth") == 1
+
+
+def test_an_image_attribute_in_the_description_can_hold_src_and_srcset_without_adding_attributes(
+    page: Page, server_url: str, add_pr: AddPr, gh_state: Path
+) -> None:
+    path = add_pr({}, {"docs/a.txt": "a\n"})
+    meta_file = gh_state / f"pr{path.rsplit('/', 1)[1]}.json"
+    body_html = (
+        '<p><picture><source media="a srcset="></picture></p>\n'
+        "<p>x style=display:block;animation:spin;width:9px;height:9px onanimationstart=document.title=1 y "
+        '<a href="https://e.com">a</a></p>\n'
+        '<p><picture><img alt="b src="></picture></p>\n'
+        '<p>x src=x onerror=document.title=2 y <a href="https://e.com">b</a></p>'
+    )
+    meta_file.write_text(json.dumps({**json.loads(meta_file.read_text()), "body": "x", "bodyHTML": body_html}))
+    open_pr(page, server_url, path)
+    expect(page.locator(".prbody source")).to_have_attribute("media", "a srcset=")
+    expect(page.locator(".prbody img")).to_have_attribute("alt", "b src=")
+    expect(page.locator(".prbody [onanimationstart], .prbody [onerror], .prbody [style]")).to_have_count(0)
+
+
 def test_a_click_on_an_image_opens_it_in_the_shell_and_the_arrows_step_through_the_images_of_the_description(
     page: Page, server_url: str, add_pr: AddPr, gh_state: Path
 ) -> None:

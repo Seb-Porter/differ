@@ -423,6 +423,18 @@ def test_image_serves_a_repository_image_read_with_gh(monkeypatch: pytest.Monkey
     assert b"Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox\r\n" in raw
 
 
+def test_image_serves_a_pasted_image_with_the_media_type_github_sends(monkeypatch: pytest.MonkeyPatch) -> None:
+    src = "https://github.com/user-attachments/assets/8aa87a1e-60d9-43fa-bcf7-4de5637fb27c"
+    monkeypatch.setattr(server.github, "repo_file", lambda url: pytest.fail("read a repository file"))
+    monkeypatch.setattr(
+        server.github, "user_attachment", lambda url: (b"GIF", "image/gif") if url == src else pytest.fail(url)
+    )
+    h = request("GET", "/image?src=" + quote(src, safe=""))
+    h.do_GET()
+    assert response(h) == (200, b"GIF")
+    assert b"Content-Type: image/gif\r\n" in cast(io.BytesIO, h.wfile).getvalue()
+
+
 @pytest.mark.parametrize(
     "src", ["https://github.com/o/r/blob/abc/page.html", "https://github.com/o/r/blob/abc/Makefile"]
 )

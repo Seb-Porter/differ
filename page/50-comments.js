@@ -149,8 +149,13 @@ const btn = (attrs, label, primary, off) => `<button ${attrs} class="${primary ?
 // GitHub's own rendering of a body, when it has one, except for suggestions: the page draws those against the file.
 function bodyHtml(c, ctx) {
   if (!c.html || /^\s*```suggestion/m.test(c.body)) return renderMarkdown(c.body, ctx);
-  return c.html.replace(/<a\b(?![^>]*\btarget=)/g, '<a target="_blank"')
-    .replace(/(<img\b[^>]*?\ssrc=")([^"]*)"/g, (m, head, src) => `${head}${esc(imageSrc(unesc(src)))}"`);
+  const t = document.createElement('template');
+  t.innerHTML = c.html;
+  t.content.querySelectorAll('a:not([target])').forEach((a) => a.setAttribute('target', '_blank'));
+  t.content.querySelectorAll('img[src]').forEach((img) => img.setAttribute('src', imageSrc(img.getAttribute('src'))));
+  t.content.querySelectorAll('img[srcset], source[srcset]')
+    .forEach((el) => el.setAttribute('srcset', imageSrcset(el.getAttribute('srcset'))));
+  return t.innerHTML;
 }
 function commentHtml(c, ctx) {
   const links = !c.url ? '' : `${c.pending ? `<a href="#" data-delete="${esc(c.id)}">delete</a>` : ''}<a href="${c.url}" target="_blank" title="Open on GitHub">↗</a>`;

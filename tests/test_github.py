@@ -1,3 +1,5 @@
+import email.message
+import io
 import json
 import subprocess
 from datetime import date
@@ -180,6 +182,114 @@ def test_repo_file_refuses_a_link_to_anything_but_a_repository_file(url: str, mo
     monkeypatch.setattr(commands.subprocess, "run", lambda args, **kwargs: pytest.fail("ran gh"))
     with pytest.raises(ValueError, match="is not a link to a file of a GitHub repository"):
         github.repo_file(url)
+
+
+ASSET = "https://github.com/user-attachments/assets/8aa87a1e-60d9-43fa-bcf7-4de5637fb27c"
+SIGNED = "https://github-production-user-asset-6210df.s3.amazonaws.com/1/a.png?X-Amz-Signature=abc"
+
+
+def fake_github(
+    monkeypatch: pytest.MonkeyPatch, ctype: str = "image/png", status: int = 302, location: str = SIGNED
+) -> list[tuple[str, str, dict[str, str]]]:
+    """Stand in for gh, github.com and the address GitHub redirects to; the requests sent to each, as host, path or
+    address, and headers."""
+    sent: list[tuple[str, str, dict[str, str]]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        assert args == ["gh", "auth", "token", "--hostname", "github.com"]
+        return subprocess.CompletedProcess(args, 0, b"gho_secret\n", b"")
+
+    class Connection:
+        def __init__(self, host: str, timeout: float) -> None:
+            self.host = host
+
+        def request(self, method: str, path: str, headers: dict[str, str]) -> None:
+            sent.append((self.host, path, headers))
+
+        def getresponse(self) -> Any:
+            return type("Answer", (), {"status": status, "getheader": lambda self, name: location})()
+
+        def close(self) -> None:
+            pass
+
+    def urlopen(url: str, timeout: float) -> Any:
+        sent.append(("", url, {}))
+        headers = email.message.Message()
+        headers["Content-Type"] = ctype
+        answer = io.BytesIO(b"PNG")
+        answer.headers = headers  # type: ignore[attr-defined]
+        return answer
+
+    monkeypatch.setattr(commands.subprocess, "run", run)
+    monkeypatch.setattr(github.http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(github.urllib.request, "urlopen", urlopen)
+    return sent
+
+
+def test_user_attachment_sends_the_token_to_github_only_and_follows_the_redirect_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = fake_github(monkeypatch, "image/png; charset=binary")
+    assert github.user_attachment(ASSET) == (b"PNG", "image/png")
+    assert sent == [
+        (
+            "github.com",
+            "/user-attachments/assets/8aa87a1e-60d9-43fa-bcf7-4de5637fb27c",
+            {"Authorization": "Bearer gho_secret", "User-Agent": "differ"},
+        ),
+        ("", SIGNED, {}),
+    ]
+
+
+def test_user_attachment_refuses_a_file_that_is_not_an_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_github(monkeypatch, "text/html")
+    with pytest.raises(ValueError, match="is not an image but text/html"):
+        github.user_attachment(ASSET)
+
+
+@pytest.mark.parametrize(("status", "location"), [(404, ""), (302, ""), (302, SIGNED.replace("https:", "http:"))])
+def test_user_attachment_fails_when_github_sends_no_secure_redirect(
+    status: int, location: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = fake_github(monkeypatch, status=status, location=location)
+    with pytest.raises(commands.CommandError, match=f"GitHub has no file at {ASSET}: HTTP {status}"):
+        github.user_attachment(ASSET)
+    assert len(sent) == 1
+
+
+def test_user_attachment_fails_when_the_redirect_does_not_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_github(monkeypatch)
+
+    def urlopen(url: str, timeout: float) -> Any:
+        raise OSError("timed out")
+
+    monkeypatch.setattr(github.urllib.request, "urlopen", urlopen)
+    with pytest.raises(commands.CommandError, match=f"GitHub did not send {ASSET}: timed out"):
+        github.user_attachment(ASSET)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        ASSET.replace("github.com", "example.com"),
+        ASSET.replace("github.com", "github.com.example.com"),
+        ASSET.replace("https://", "http://"),
+        ASSET.replace("/assets/", "/files/"),
+        "https://github.com/user-attachments/assets/shot.png",
+        "https://github.com/user-attachments/assets/",
+        "https://github.com/user-attachments/assets/../../o/r/raw/main/a.png",
+        ASSET + "/../../../o/r",
+        ASSET + "?x=1",
+        ASSET + "\n",
+        "https://github.com/o/r/blob/main/a.png",
+    ],
+)
+def test_user_attachment_refuses_a_link_to_anything_but_a_pasted_file(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(commands.subprocess, "run", lambda args, **kwargs: pytest.fail("ran gh"))
+    with pytest.raises(ValueError, match="is not a link to a file pasted on GitHub"):
+        github.user_attachment(url)
 
 
 def test_repos_of_recent_prs_names_the_repository_of_each_pull_request_newest_first(

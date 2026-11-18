@@ -1,8 +1,12 @@
 // The overview at the top of the main pane: the PR description, the renames and the conversation.
 
-// GitHub sends a file of a private repository only to a signed-in browser, so the server reads such an image with gh.
+// GitHub sends a file of a private repository, and a file pasted into a description or a comment, only to a signed-in
+// browser, so the server reads such an image with gh's sign-in.
 const REPO_FILE = /^https:\/\/(github\.com\/[^/]+\/[^/]+\/(blob|raw)\/|raw\.githubusercontent\.com\/)/;
-const imageSrc = (url) => REPO_FILE.test(url) ? `/image?src=${encodeURIComponent(url)}` : url;
+const USER_ATTACHMENT = /^https:\/\/github\.com\/user-attachments\/assets\/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const readByServer = (url) => REPO_FILE.test(url) || USER_ATTACHMENT.test(url);
+const imageSrc = (url) => readByServer(url) ? `/image?src=${encodeURIComponent(url)}` : url;
+const imageSrcset = (set) => set.replace(/(^|,)(\s*)(\S*[^\s,])/g, (m, sep, space, url) => sep + space + imageSrc(url));
 
 // Enough markdown for a PR description: headings, bullets, paragraphs, images, links, bold, inline code.
 function renderMarkdown(md, ctx) {
@@ -14,7 +18,7 @@ function renderMarkdown(md, ctx) {
       .replace(/`([^`]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, (m, alt, src) => {
-        images.push(REPO_FILE.test(unesc(src)) ? `<img src="${esc(imageSrc(unesc(src)))}" alt="${alt}">`
+        images.push(readByServer(unesc(src)) ? `<img src="${esc(imageSrc(unesc(src)))}" alt="${alt}">`
           : `<a href="${src}" target="_blank">${alt || src}</a>`);
         return `\uE000${images.length - 1}\uE000`;
       })
