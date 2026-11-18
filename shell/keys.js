@@ -13,5 +13,5 @@ const Keys = (() => {
     for (const el of root.querySelectorAll('[title*="⌘"]')) el.title = chords(el.title);
   }
   document.addEventListener('DOMContentLoaded', () => relabel(document));
-  return { MAC, primary, label, relabel };
+  return { primary, label, relabel };
 })();

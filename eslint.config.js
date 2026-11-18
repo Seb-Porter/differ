@@ -1,6 +1,6 @@
 // render.py inlines shell/frame.js and then page/*.js in name order into one script, with shell/theme.js,
-// shell/keys.js and shell/notice.js in the head of every document, so a name declared at the top level of one of those files is a
-// global in the others.
+// shell/keys.js and shell/notice.js in the head of every document, so a name declared at the top level of one of
+// those files is a global in the others.
 // The page's globals are read from the files themselves, so the config needs no change when a file declares a
 // new name; a name declared twice across files is a redeclaration, as it would be in the page.
 const fs = require("node:fs");

@@ -150,7 +150,7 @@ const update = () => {
   loadBoard();
 };
 document.addEventListener('keydown', (e) => {
-  if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'r') { e.preventDefault(); update(); }
+  if (Keys.primary(e) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'r') { e.preventDefault(); update(); }
 });
 // The server drew the board with every row, so saved toggles first need a cached load.
 loadBoard(on.length > 0);

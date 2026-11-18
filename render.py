@@ -434,9 +434,9 @@ def search_clear_css() -> str:
 
 
 def theme_head() -> str:
-    """The theme variables, the status and reason icons, the base stylesheet, the search clear button and the scripts that
-    apply the saved theme, name the shortcuts' keys, draw the tooltip and draw notices, for the head of a document so it never flashes the
-    default theme. The base stylesheet comes after the icons, so a component can recolour the icon it holds."""
+    """The theme variables, the status and reason icons, the base stylesheet, the search clear button and the scripts
+    that apply the saved theme, name the shortcuts' keys, draw the tooltip and draw notices, for the head of a document
+    so it never flashes the default theme. The base stylesheet comes after the icons, so a component can recolour the icon it holds."""
     css = "\n".join([theme_css(), icon_css(), (SHELL_DIR / "base.css").read_text(encoding="utf-8"), search_clear_css()])
     js = "\n".join(
         (SHELL_DIR / name).read_text(encoding="utf-8") for name in ("theme.js", "keys.js", "tooltip.js", "notice.js")
