@@ -24,19 +24,15 @@ stops reading, holds up that session alone."""
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
-import select
 import shutil
 import signal
 import stat
-import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import threading
 import time
 import unicodedata
@@ -54,6 +50,7 @@ import commands
 import github
 import mcp
 import records
+import terminal
 from github import PullRef
 
 ROOT = Path(__file__).resolve().parent
@@ -111,8 +108,12 @@ DEFAULT_MODEL: Model = "claude-opus-5-5"
 # fix it (`install`).
 Setup = Literal["", "missing", "old"]
 # The command that installs Claude Code where `binary` looks first after the PATH, ~/.local/bin: the native installer
-# Claude Code's docs give. A `claude` that is too old updates itself with UPDATE_ARGS.
-INSTALL_COMMAND = ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]
+# Claude Code's docs give for the system. A `claude` that is too old updates itself with UPDATE_ARGS.
+INSTALL_COMMAND = (
+    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex"]
+    if sys.platform == "win32"
+    else ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]
+)
 UPDATE_ARGS = ["update"]
 # The seconds an address that was pasted waits for the title to show Claude working, before it leaves the queue: a
 # title of another shape never shows it.
@@ -168,8 +169,8 @@ class Session:
     id: str = ""
     resume: bool = False
     model: Model = DEFAULT_MODEL
-    proc: subprocess.Popen[bytes] | None = None
-    fd: int | None = None
+    proc: terminal.Process | None = None
+    term: terminal.Terminal | None = None
     started_at: float = 0.0
     starting: bool = False
     error: str = ""
@@ -211,7 +212,8 @@ def binary() -> Path | None:
         return Path(named)
     if found := shutil.which("claude"):
         return Path(found)
-    for candidate in (Path.home() / ".local" / "bin" / "claude", Path.home() / ".claude" / "local" / "claude"):
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    for candidate in (Path.home() / ".local" / "bin" / name, Path.home() / ".claude" / "local" / name):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
     return None
@@ -258,7 +260,8 @@ def trust(folder: Path) -> None:
     the link leads. The new file is written next to the old one, with its mode, and takes its place only while the old
     one is as it was when read; otherwise the write starts again from the changed file. Raises ValueError when the file
     is not a JSON object, and OSError when it cannot be read or written, or keeps changing."""
-    key = os.path.realpath(folder)
+    # Claude Code writes a Windows path with forward slashes.
+    key = Path(os.path.realpath(folder)).as_posix()
     with config_lock:
         for _ in range(TRUST_TRIES):
             path = config_path().resolve()
@@ -316,7 +319,7 @@ def system_prompt(ref: PullRef, pr: github.PullRequest, viewer: str) -> str:
     """The shipped prompt with the pull request, its author, the reader and its worktree filled in."""
     worktree = DETACHED if pr.status in claude.ENDED else ON_BRANCH
     return (
-        PROMPT.read_text()
+        PROMPT.read_text(encoding="utf-8")
         .replace("{ref}", str(ref))
         .replace("{author}", pr.author or "unknown")
         .replace("{viewer}", viewer or "unknown")
@@ -507,20 +510,20 @@ def install(ref: PullRef, port: int, cols: int, rows: int) -> dict:
         claude_bin = binary()
         args = [str(claude_bin), *UPDATE_ARGS] if claude_bin is not None and s.setup == "old" else INSTALL_COMMAND
         try:
-            proc, master = _open(s, args, Path.home())
+            term = _open(s, args, Path.home())
         except OSError as exc:
             raise RuntimeError(f"Could not run {args[0]}: {exc}") from exc
         s.installing = True
-        threading.Thread(target=_read_install, args=(s, proc, master, port, s.generation), daemon=True).start()
+        threading.Thread(target=_read_install, args=(s, term, port, s.generation), daemon=True).start()
         return status(ref)
 
 
-def _read_install(s: Session, proc: subprocess.Popen[bytes], fd: int, port: int, generation: int) -> None:
+def _read_install(s: Session, term: terminal.Terminal, port: int, generation: int) -> None:
     """Relay the install to the terminals until it ends, then start the session, or say that it failed: its output
     in the terminal says why."""
-    code = _relay(s, proc, fd, claude_code=False)
+    code = _relay(s, term, claude_code=False)
     with lock:
-        if s.generation != generation or s.proc is not proc:
+        if s.generation != generation or s.proc is not term.proc:
             return
         s.proc, s.installing = None, False
         if code != 0:
@@ -591,58 +594,29 @@ def _spawn(s: Session, claude_bin: Path, folder: Path, port: int, pr: github.Pul
         system_prompt(s.ref, pr, viewer),
         listen_prompt(s.ref, port, pr),
     ]
-    proc, master = _open(s, args, folder)
+    term = _open(s, args, folder)
     s.installing = False
-    records.SESSIONS.write(s.ref, {"id": s.id, "resume": s.resume, "pid": proc.pid})
-    threading.Thread(target=_read, args=(s, proc, master, port, s.generation), daemon=True).start()
+    records.SESSIONS.write(s.ref, {"id": s.id, "resume": s.resume, "pid": term.proc.pid})
+    threading.Thread(target=_read, args=(s, term, port, s.generation), daemon=True).start()
 
 
-def _open(s: Session, args: list[str], folder: Path) -> tuple[subprocess.Popen[bytes], int]:
+def _open(s: Session, args: list[str], folder: Path) -> terminal.Terminal:
     """Run the command in a new pseudoterminal of the session's size, as the session's process, with a clean screen
-    for the terminals that connect later. Answers the process and the pseudoterminal's master. Call it with the lock
-    held."""
-    rows, cols = s.size[1], s.size[0]
-    master, slave = os.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    # The master never blocks: the reader waits for output with select, and a write the process does not read yet
-    # waits in short steps, so it can stop when the process is gone instead of hanging on to the descriptor.
-    os.set_blocking(master, False)
-    try:
-        proc = subprocess.Popen(
-            args,
-            cwd=folder,
-            env=environment(),
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            start_new_session=True,
-            # The call runs in the child between fork and exec, where a lock another thread holds would never open;
-            # this one makes one ioctl and takes no lock.
-            preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0),
-        )
-    except OSError:
-        os.close(master)
-        raise
-    finally:
-        os.close(slave)
-    s.proc, s.fd, s.started_at, s.starting = proc, master, time.time(), False
+    for the terminals that connect later. Call it with the lock held."""
+    term = terminal.spawn(args, folder, environment(), *s.size)
+    s.proc, s.term, s.started_at, s.starting = term.proc, term, time.time(), False
     s.output.clear()
     s.title, s.asking, s.typed, s.working_since = "", False, False, ""
     s.addresses.clear()
-    return proc, master
+    return term
 
 
-def _relay(s: Session, proc: subprocess.Popen[bytes], fd: int, claude_code: bool) -> int:
+def _relay(s: Session, term: terminal.Terminal, claude_code: bool) -> int:
     """Pass the process's output to the buffer and the terminals until the process ends, and answer its exit code.
     Only Claude Code's output sets the title, and keeps its conversation for a resume once it has run QUICK_EXIT."""
+    proc = term.proc
     while True:
-        try:
-            select.select([fd], [], [])
-            data = os.read(fd, 65536)
-        except BlockingIOError:
-            continue
-        except (OSError, ValueError):
-            data = b""
+        data = term.read()
         if not data:
             break
         with lock:
@@ -671,21 +645,18 @@ def _relay(s: Session, proc: subprocess.Popen[bytes], fd: int, claude_code: bool
     # descriptor or on one the system gave to something else since.
     with s.writes:
         with lock:
-            if s.fd == fd:
-                s.fd = None
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+            if s.term is term:
+                s.term = None
+        term.close()
     return code
 
 
-def _read(s: Session, proc: subprocess.Popen[bytes], fd: int, port: int, generation: int) -> None:
+def _read(s: Session, term: terminal.Terminal, port: int, generation: int) -> None:
     """Pass the process's output to the buffer and the terminals until the process ends, then tell why it ended. A
     start whose id has no conversation gets a new id and starts again; one whose id is in use already resumes it."""
-    code = _relay(s, proc, fd, claude_code=True)
+    code = _relay(s, term, claude_code=True)
     with lock:
-        if s.generation != generation or s.proc is not proc:
+        if s.generation != generation or s.proc is not term.proc:
             return
         s.proc = None
         quick = time.time() - s.started_at < QUICK_EXIT
@@ -785,18 +756,13 @@ def _write(s: Session, data: bytes) -> None:
     while left:
         with s.writes:
             with lock:
-                fd = s.fd
-            if fd is None:
+                term = s.term
+            if term is None:
                 return
-            try:
-                left = left[os.write(fd, left) :]
+            if written := term.write(left):
+                left = left[written:]
                 continue
-            except BlockingIOError:
-                pass
-        try:
-            select.select([], [fd], [], WRITE_WAIT)
-        except (OSError, ValueError):
-            pass
+        term.wait_writable(WRITE_WAIT)
 
 
 # How long a submit waits after its paste before it presses Enter. Claude Code takes an Enter that arrives soon after
@@ -857,27 +823,20 @@ def resize(ref: PullRef, cols: int, rows: int) -> None:
     with lock:
         s = session_of(ref)
         s.size = (max(20, cols), max(5, rows))
-        if s.fd is not None:
-            fcntl.ioctl(s.fd, termios.TIOCSWINSZ, struct.pack("HHHH", s.size[1], s.size[0], 0, 0))
+        if s.term is not None:
+            s.term.resize(*s.size)
 
 
-# The signals that end a session's process group, each with the time it gets before the next one.
-SIGNALS = ((signal.SIGHUP, 3.0), (signal.SIGTERM, 2.0), (signal.SIGKILL, 2.0))
-
-
-def end(procs: list[subprocess.Popen[bytes]]) -> None:
-    """End the processes and their process groups together: a hangup, as a closed terminal gives, then SIGTERM, then
-    SIGKILL, each to the processes still running after the previous one had its moment. The reader thread closes the
-    pseudoterminal once the process is gone; closing it here, under a read that blocks on it, hangs on macOS."""
-    for sig, wait in SIGNALS:
+def end(procs: list[terminal.Process]) -> None:
+    """End the processes and the processes they started together, in the stages of `terminal.STOPS`, each to the
+    processes still running after the previous one had its moment. The reader thread closes the pseudoterminal once
+    the process is gone; closing it here, under a read that blocks on it, hangs on macOS."""
+    for stage, wait in terminal.STOPS:
         procs = [proc for proc in procs if proc.poll() is None]
         if not procs:
             return
         for proc in procs:
-            try:
-                os.killpg(proc.pid, sig)
-            except OSError:
-                pass
+            terminal.stop(proc, stage)
         deadline = time.time() + wait
         for proc in procs:
             try:
@@ -899,13 +858,13 @@ def close(ref: PullRef, remove_worktree: bool = True) -> None:
         checkout.remove_worktree(ref)
 
 
-def _forget(s: Session) -> subprocess.Popen[bytes] | None:
+def _forget(s: Session) -> terminal.Process | None:
     """Drop the session's start and its process, for the caller to end, and note in its file that none runs. Call
     it with the lock held."""
     s.generation += 1
     s.starting = False
     proc = s.proc
-    s.proc, s.fd = None, None
+    s.proc, s.term = None, None
     if proc is not None:
         records.SESSIONS.write(s.ref, {"id": s.id, "resume": s.resume, "pid": 0})
     return proc
@@ -965,7 +924,10 @@ def stop_all() -> None:
 def reap_orphans() -> None:
     """End the processes of sessions a server that died left behind: a pid a session file names counts only while
     `ps` shows a `claude` with that session id running under it with no parent left, so a pid the system gave to
-    another process since, and a session of another server on the same cache, are left alone."""
+    another process since, and a session of another server on the same cache, are left alone. On Windows a session's
+    processes end with the server that started them (`terminal`), so there are none to look for."""
+    if sys.platform == "win32":
+        return
     for ref in records.SESSIONS.refs():
         saved = records.SESSIONS.read(ref, dict)
         pid, session_id = saved.get("pid"), saved.get("id")

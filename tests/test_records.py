@@ -55,7 +55,7 @@ def test_kept_lists_each_pull_request_with_a_record_once_and_skips_files_that_ar
 def test_a_write_that_fails_raises_and_leaves_the_old_file_and_no_temporary_file() -> None:
     records.COMMENTS.write(REF, [{"id": "a"}])
 
-    def full(self: Path, text: str) -> None:
+    def full(self: Path, text: str, **_: object) -> None:
         Path.open(self, "w").close()
         raise OSError(28, "No space left on device")
 

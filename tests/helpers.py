@@ -25,7 +25,7 @@ GIT_ENV = {
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=GIT_ENV
+        ["git", "-C", str(repo), *args], check=True, capture_output=True, encoding="utf-8", env=GIT_ENV
     ).stdout
 
 
@@ -40,7 +40,7 @@ def commit_tree(repo: Path, files: Files, message: str, amend: bool = False) -> 
         if isinstance(content, bytes):
             target.write_bytes(content)
         else:
-            target.write_text(content)
+            target.write_text(content, encoding="utf-8", newline="")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "--allow-empty", *(["--amend"] if amend else []), "-m", message)
     return git(repo, "rev-parse", "HEAD").strip()

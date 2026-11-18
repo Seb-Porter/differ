@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -6,11 +7,12 @@ from pathlib import Path
 import pytest
 
 import checkout
+import launcher
 from commands import CommandError
 from github import PullRef
 from helpers import GIT_ENV, Files, commit_tree, git
 
-FAKE_GH = Path(__file__).resolve().parent / "e2e" / "fakegh"
+FAKE_GH = launcher.fake_gh_folder()
 REF = PullRef("o", "r", 7)
 OTHER = PullRef("o", "r", 8)
 FORK = PullRef("o", "r", 9)
@@ -72,7 +74,7 @@ def gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
         monkeypatch.setenv(name, GIT_ENV[name])
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", GIT_ENV["GIT_CONFIG_GLOBAL"])
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("PATH", f"{FAKE_GH}:{GIT_ENV['PATH']}")
+    monkeypatch.setenv("PATH", f"{FAKE_GH}{os.pathsep}{GIT_ENV['PATH']}")
     gh = FakeGitHub(tmp_path / "github")
     monkeypatch.setenv("FAKE_GH_STATE", str(gh.state))
     gh.pr(7, "feature")
