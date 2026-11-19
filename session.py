@@ -598,8 +598,9 @@ def _spawn(s: Session, claude_bin: Path, folder: Path, port: int, pr: github.Pul
     ]
     term = _open(s, args, folder)
     s.installing = False
-    records.SESSIONS.write(s.ref, {"id": s.id, "resume": s.resume, "pid": term.proc.pid})
+    # The reader starts first: it alone closes the terminal, so a failed write must not leave the session unread.
     threading.Thread(target=_read, args=(s, term, port, s.generation), daemon=True).start()
+    records.SESSIONS.write(s.ref, {"id": s.id, "resume": s.resume, "pid": term.proc.pid})
 
 
 def _open(s: Session, args: list[str], folder: Path) -> terminal.Terminal:
@@ -617,40 +618,42 @@ def _relay(s: Session, term: terminal.Terminal, claude_code: bool) -> int:
     """Pass the process's output to the buffer and the terminals until the process ends, and answer its exit code.
     Only Claude Code's output sets the title, and keeps its conversation for a resume once it has run QUICK_EXIT."""
     proc = term.proc
-    while True:
-        data = term.read()
-        if not data:
-            break
-        with lock:
-            s.output += data
-            if len(s.output) > BUFFER_MAX:
-                del s.output[: len(s.output) - BUFFER_MAX]
-            # A title can arrive split across two reads, so the search reaches back into what came before.
-            # A title that turns from waiting to working ends a question, as a backstop for a way out of it that posts
-            # no hook. Only the turn counts, since the hook that starts a question can arrive before the last title of
-            # the work that led to it.
-            if claude_code and (titles := TITLE.findall(s.output, max(0, len(s.output) - len(data) - TITLE_MAX))):
-                title = titles[-1].decode(errors="replace")
-                working, was = title_state(title)[0], title_state(s.title)[0]
-                if working and not was:
-                    s.asking = False
-                s.title = title
-                if working != was:
-                    _title_turned(s, working)
-            clients = list(s.clients)
-            if claude_code and not s.resume and time.time() - s.started_at > QUICK_EXIT:
-                s.resume = True
-                records.SESSIONS.write(s.ref, {"id": s.id, "resume": True, "pid": proc.pid})
-        _send(s, clients, data)
-    code = proc.wait()
-    # The terminal closes once no write holds it, and the session forgets it first, so no write starts on a closed
-    # terminal, or on a descriptor the system gave to something else since.
-    with s.writes:
-        with lock:
-            if s.term is term:
-                s.term = None
-        term.close()
-    return code
+    try:
+        while True:
+            data = term.read()
+            if not data:
+                break
+            with lock:
+                s.output += data
+                if len(s.output) > BUFFER_MAX:
+                    del s.output[: len(s.output) - BUFFER_MAX]
+                # A title can arrive split across two reads, so the search reaches back into what came before.
+                # A title that turns from waiting to working ends a question, as a backstop for a way out of it that
+                # posts no hook. Only the turn counts, since the hook that starts a question can arrive before the last
+                # title of the work that led to it.
+                if claude_code and (titles := TITLE.findall(s.output, max(0, len(s.output) - len(data) - TITLE_MAX))):
+                    title = titles[-1].decode(errors="replace")
+                    working, was = title_state(title)[0], title_state(s.title)[0]
+                    if working and not was:
+                        s.asking = False
+                    s.title = title
+                    if working != was:
+                        _title_turned(s, working)
+                clients = list(s.clients)
+                if claude_code and not s.resume and time.time() - s.started_at > QUICK_EXIT:
+                    s.resume = True
+                    records.SESSIONS.write(s.ref, {"id": s.id, "resume": True, "pid": proc.pid})
+            _send(s, clients, data)
+        return proc.wait()
+    finally:
+        # The terminal closes once no write holds it, and the session forgets it first, so no write starts on a
+        # closed terminal, or on a descriptor the system gave to something else since. It closes even when the relay
+        # fails, since nothing else would end what it runs.
+        with s.writes:
+            with lock:
+                if s.term is term:
+                    s.term = None
+            term.close()
 
 
 def _read(s: Session, term: terminal.Terminal, port: int, generation: int) -> None:

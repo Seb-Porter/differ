@@ -291,11 +291,15 @@ if sys.platform == "win32":
 
         def close(self) -> None:
             """Also ends the processes the command started that are still there, as the end of a POSIX session's
-            terminal does."""
-            self.console.close_console()
+            terminal does. The pipes close before the console: before Windows 11 24H2, closing a console waits for its
+            last output to be read, which nothing reads once the reader has stopped."""
             self.console.end_job()
-            for handle in (self.output, self.input):
-                _CloseHandle(handle)
+            with self.console.lock:
+                pipes, self.output, self.input = (self.output, self.input), 0, 0
+            for handle in pipes:
+                if handle:
+                    _CloseHandle(handle)
+            self.console.close_console()
 
     def _environment_block(env: Mapping[str, str]) -> ctypes.Array[ctypes.c_wchar]:
         """The environment as CreateProcessW takes it: NAME=value strings sorted by name without regard to case,

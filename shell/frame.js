@@ -64,9 +64,11 @@ if (SHELL) {
   // every Escape.
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.preventDefault(); }, true);
   // Cmd+Plus, Cmd+Minus and Cmd+0 zoom the desktop app's window. The shell owns the zoom, so the page forwards the
-  // chord; it leaves the default in place, so a browser still zooms by itself.
+  // chord; it leaves the default in place, so a browser still zooms by itself. Ctrl+Minus in Claude's terminal is
+  // Claude Code's undo, so off a Mac the terminal keeps it.
   document.addEventListener('keydown', (e) => {
     if (!Keys.primary(e) || e.altKey) return;
+    if (e.ctrlKey && (e.key === '-' || e.key === '_') && e.target.closest && e.target.closest('.xterm')) return;
     const dir = e.key === '=' || e.key === '+' ? 1 : e.key === '-' || e.key === '_' ? -1 : e.key === '0' ? 0 : null;
     if (dir !== null) SHELL.zoom(dir);
   }, true);
