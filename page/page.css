@@ -217,7 +217,7 @@ tr.runhead.locked td { cursor: default; }
 .hljs-number, .hljs-literal { color: var(--syntax-num); } .hljs-title.function_ { color: var(--syntax-fn); } .hljs-title.class_ { color: var(--syntax-cls); } .hljs-built_in { color: var(--syntax-builtin); }
 .hljs-params { color: inherit; } .hljs-meta { color: var(--syntax-num); }
 
-/* In the desktop app the title bar is transparent and the page runs under it; the panes start below it
+/* On macOS the desktop app's title bar is transparent and the page runs under it; the panes start below it
    and the strip behind the traffic lights takes each pane's own colour. */
 html.titlebar { --titlebar: 28px; }
 html.titlebar body { padding-top: var(--titlebar); background: linear-gradient(90deg, var(--bg-panel) 0 var(--side, 420px), var(--border) 0 calc(var(--side, 420px) + 1px), var(--bg-canvas) 0); }

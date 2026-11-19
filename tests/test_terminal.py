@@ -3,8 +3,10 @@ records what it reads instead of echoing it, since a Windows pseudo console rend
 
 import os
 import signal
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -146,3 +148,16 @@ def test_closing_the_terminal_ends_a_process_the_command_started_without_a_conso
     finally:
         if alive(detached.grandchild):
             os.kill(detached.grandchild, signal.SIGTERM)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows waits on the parent process itself")
+def test_waiting_for_the_parent_returns_once_it_ends_or_at_once_when_it_is_gone() -> None:
+    parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1)"])
+    waited = threading.Thread(target=terminal.wait_for_parent, args=(parent.pid,), daemon=True)
+    waited.start()
+    time.sleep(0.3)
+    assert waited.is_alive()
+    parent.wait(10)
+    waited.join(5)
+    assert not waited.is_alive()
+    terminal.wait_for_parent(parent.pid)

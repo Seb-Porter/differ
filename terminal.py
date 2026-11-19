@@ -176,6 +176,7 @@ if sys.platform == "win32":
     _ReadFile = _declare("ReadFile", _BOOL, _HANDLE, ctypes.c_void_p, _DWORD, ctypes.POINTER(_DWORD), ctypes.c_void_p)
     _WriteFile = _declare("WriteFile", _BOOL, _HANDLE, ctypes.c_void_p, _DWORD, ctypes.POINTER(_DWORD), ctypes.c_void_p)
     _CloseHandle = _declare("CloseHandle", _BOOL, _HANDLE)
+    _OpenProcess = _declare("OpenProcess", _HANDLE, _DWORD, _BOOL, _DWORD)
 
     _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
     _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
@@ -185,6 +186,8 @@ if sys.platform == "win32":
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     _INFINITE = 0xFFFFFFFF
+    _SYNCHRONIZE = 0x00100000
+    _ERROR_INVALID_PARAMETER = 87
     _WAIT_OBJECT_0 = 0
     # The longest a wait holds the process's lock, so another thread's wait or poll is not held up behind it.
     _WAIT_SLICE = 0.1
@@ -412,6 +415,19 @@ if sys.platform == "win32":
         else:
             proc.console.terminate()
 
+    def wait_for_parent(parent: int) -> None:
+        """Return once the process with this pid has ended. Windows never hands an orphan to a new parent, so the
+        parent pid alone would not change."""
+        handle = _OpenProcess(_SYNCHRONIZE, False, parent)
+        if not handle:
+            if ctypes.get_last_error() == _ERROR_INVALID_PARAMETER:
+                return  # It has already ended.
+            _check(handle, "OpenProcess")
+        try:
+            _WaitForSingleObject(handle, _INFINITE)
+        finally:
+            _CloseHandle(handle)
+
 else:
     import fcntl
     import select
@@ -496,3 +512,8 @@ else:
             os.killpg(proc.pid, _SIGNALS[stage])
         except OSError:
             pass
+
+    def wait_for_parent(parent: int) -> None:
+        """Return once the parent process has ended, checked once a second: its orphan then has another parent."""
+        while os.getppid() == parent:
+            time.sleep(1)
